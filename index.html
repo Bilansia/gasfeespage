@@ -53,23 +53,11 @@
 
     <script>
         // --- CONFIGURATION (Public RPC URLs) ---
-        
-        // 1. Arc Testnet
         const ARC_RPC_URL = "https://rpc.testnet.arc.network";
-        
-        // 2. Ethereum Sepolia
         const ETH_SEPOLIA_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
-        
-        // 3. Solana Devnet
         const SOLANA_DEVNET_RPC_URL = "https://api.devnet.solana.com";
-
-        // 4. Polygon Amoy (Updated to stable public node)
-        const POLYGON_AMOY_RPC_URL = "https://polygon-amoy-rpc.publicnode.com";
-
-        // 5. Arbitrum Sepolia (Updated to stable public node)
-        const ARBITRUM_SEPOLIA_RPC_URL = "https://arbitrum-sepolia-rpc.publicnode.com";
-
-        // Free Public API for prices (CoinGecko)
+        const POLYGON_AMOY_RPC_URL = "https://polygon-amoy.drpc.org";
+        const ARBITRUM_SEPOLIA_RPC_URL = "https://arbitrum-sepolia.drpc.org";
         const COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,solana,matic-network&vs_currencies=usd";
 
         // --- Transaction Constants ---
@@ -91,6 +79,16 @@
             solanaConnection = new solanaWeb3.Connection(SOLANA_DEVNET_RPC_URL);
         }
 
+        // Helper function: Returns { gasPrice: null } if the RPC fails, preventing a crash
+        async function safeGetFeeData(provider, name) {
+            try {
+                return await provider.getFeeData();
+            } catch (error) {
+                console.warn(`RPC Error for ${name} (Node might be down or rate-limited). Row will be hidden.`);
+                return { gasPrice: null }; 
+            }
+        }
+
         // --- Main Logic ---
         async function refreshGasData() {
             document.getElementById('loader').style.display = 'inline';
@@ -98,11 +96,13 @@
             tableBody.innerHTML = ''; 
 
             try {
-                // 1. Fetch Token Prices (ANTI-CRASH MODE)
-                const pricesResponse = await fetch(COINGECKO_API_URL);
-                const tokenPrices = pricesResponse.ok ? await pricesResponse.json() : {};
+                // 1. Fetch Token Prices
+                let tokenPrices = {};
+                try {
+                    const pricesResponse = await fetch(COINGECKO_API_URL);
+                    if (pricesResponse.ok) tokenPrices = await pricesResponse.json();
+                } catch (e) { console.warn("CoinGecko rate-limited."); }
 
-                // Fallback to 0 if the API is rate-limited
                 const prices = {
                     eth: tokenPrices?.ethereum?.usd || 0,
                     sol: tokenPrices?.solana?.usd || 0,
@@ -112,44 +112,46 @@
 
                 // 2. Fetch On-Chain Data concurrently
                 const [arcFee, ethFee, polygonFee, arbitrumFee] = await Promise.all([
-                    providers.arc.getFeeData(),
-                    providers.eth.getFeeData(),
-                    providers.polygon.getFeeData(),
-                    providers.arbitrum.getFeeData()
+                    safeGetFeeData(providers.arc, "Arc"),
+                    safeGetFeeData(providers.eth, "Ethereum"),
+                    safeGetFeeData(providers.polygon, "Polygon"),
+                    safeGetFeeData(providers.arbitrum, "Arbitrum")
                 ]);
 
-                // --- COST CALCULATIONS (ANTI-CRASH MODE) ---
-                const arcRawGas = arcFee?.gasPrice || 0;
-                const ethRawGas = ethFee?.gasPrice || 0;
-                const polyRawGas = polygonFee?.gasPrice || 0;
-                const arbRawGas = arbitrumFee?.gasPrice || 0;
+                // 3. Update UI CONDITIIONALLY (Only display the row if gasPrice is NOT null)
 
-                // A. ARC NETWORK (USDC)
-                const arcUsdcCost = (Number(arcRawGas) * EVM_TRANSFER_GAS_UNITS) / 1e15;
+                // A. ARC NETWORK
+                if (arcFee.gasPrice !== null) {
+                    const arcUsdcCost = (Number(arcFee.gasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e15;
+                    addTableRow(tableBody, "Arc Network (USDC Gas)", prices.usdc, `${ethers.formatUnits(arcFee.gasPrice, 'gwei')} Gwei`, `$${arcUsdcCost.toFixed(6)} USDC`, true);
+                }
 
-                // B. ETHEREUM SEPOLIA (ETH)
-                const ethUsdCost = ((Number(ethRawGas) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.eth;
+                // B. ETHEREUM SEPOLIA
+                if (ethFee.gasPrice !== null) {
+                    const ethUsdCost = ((Number(ethFee.gasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.eth;
+                    addTableRow(tableBody, "Ethereum Sepolia (ETH)", prices.eth, `${ethers.formatUnits(ethFee.gasPrice, 'gwei')} Gwei`, `$${ethUsdCost.toFixed(4)}`);
+                }
 
-                // C. SOLANA DEVNET (SOL)
+                // C. ARBITRUM SEPOLIA
+                if (arbitrumFee.gasPrice !== null) {
+                    const arbUsdCost = ((Number(arbitrumFee.gasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.eth;
+                    addTableRow(tableBody, "Arbitrum Sepolia (ETH L2)", prices.eth, `${ethers.formatUnits(arbitrumFee.gasPrice, 'gwei')} Gwei`, `$${arbUsdCost.toFixed(6)}`);
+                }
+
+                // D. POLYGON AMOY
+                if (polygonFee.gasPrice !== null) {
+                    const polyUsdCost = ((Number(polygonFee.gasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.matic;
+                    addTableRow(tableBody, "Polygon Amoy (MATIC)", prices.matic, `${ethers.formatUnits(polygonFee.gasPrice, 'gwei')} Gwei`, `$${polyUsdCost.toFixed(6)}`);
+                }
+
+                // E. SOLANA DEVNET (Always displays as it doesn't rely on EVM fee fetching here)
                 const solUsdCost = (SOLANA_TRANSFER_FEE_LAMPORTS / 1e9) * prices.sol;
-
-                // D. POLYGON AMOY (MATIC/POL)
-                const polyUsdCost = ((Number(polyRawGas) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.matic;
-
-                // E. ARBITRUM SEPOLIA (ETH used for gas)
-                const arbUsdCost = ((Number(arbRawGas) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.eth;
-
-                // 3. Update UI
-                addTableRow(tableBody, "Arc Network (USDC Gas)", prices.usdc, `${ethers.formatUnits(arcRawGas, 'gwei')} Gwei`, `$${arcUsdcCost.toFixed(6)} USDC`, true);
-                addTableRow(tableBody, "Ethereum Sepolia (ETH)", prices.eth, `${ethers.formatUnits(ethRawGas, 'gwei')} Gwei`, `$${ethUsdCost.toFixed(4)}`);
-                addTableRow(tableBody, "Arbitrum Sepolia (ETH L2)", prices.eth, `${ethers.formatUnits(arbRawGas, 'gwei')} Gwei`, `$${arbUsdCost.toFixed(6)}`);
-                addTableRow(tableBody, "Polygon Amoy (MATIC)", prices.matic, `${ethers.formatUnits(polyRawGas, 'gwei')} Gwei`, `$${polyUsdCost.toFixed(6)}`);
                 addTableRow(tableBody, "Solana Devnet (SOL)", prices.sol, `${SOLANA_TRANSFER_FEE_LAMPORTS} Lamports`, `$${solUsdCost.toFixed(6)}`);
 
                 resetCountdown();
             } catch (error) {
-                console.error("Data refresh failed:", error);
-                tableBody.innerHTML = `<tr><td colspan="4" class="stale">Error fetching on-chain data. Public RPC nodes might be rate-limited. Please wait for the next automatic refresh.</td></tr>`;
+                console.error("Critical rendering error:", error);
+                tableBody.innerHTML = `<tr><td colspan="4" class="stale">A critical error occurred. Please refresh the page.</td></tr>`;
             } finally {
                 document.getElementById('loader').style.display = 'none';
             }
@@ -160,7 +162,6 @@
             const row = document.createElement('tr');
             if (isArc) row.classList.add('arc-row'); 
             
-            // ANTI-CRASH: (price || 0).toFixed(2) ensures it won't crash if price is missing
             row.innerHTML = `
                 <td>${chain}</td>
                 <td>$${(price || 0).toFixed(2)} <span class="token-price">${isArc ? '' : '(Live)'}</span></td>
