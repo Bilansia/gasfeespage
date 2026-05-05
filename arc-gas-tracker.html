@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arc Multi-Chain Gas Tracker (Sécurisé)</title>
+    
+    <!-- Inclusions des bibliothèques Web3 via CDN (Lecture Seule) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+    <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
+
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1a1a1a; color: #e0e0e0; text-align: center; padding: 20px; }
+        h1 { color: #fff; }
+        p.subtitle { color: #aaa; margin-bottom: 30px; }
+        
+        .container { max-width: 900px; margin: 0 auto; background-color: #2d2d2d; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; background-color: #333; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 15px; border-bottom: 1px solid #444; text-align: left; }
+        th { background-color: #444; color: #fff; font-weight: 600; }
+        tr:last-child td { border-bottom: none; }
+        
+        .arc-row { background-color: rgba(0, 255, 127, 0.1); font-weight: bold; color: #00ff7f; }
+        .token-price { font-size: 0.85em; color: #aaa; }
+        .stale { color: #ff6b6b; font-size: 0.8em; }
+
+        #refresh-status { margin-top: 15px; font-size: 0.9em; color: #888; }
+        .loader { color: #00ff7f; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>Arc Multi-Chain Gas Tracker</h1>
+    <p class="subtitle">Comparaison en temps réel des frais de transaction (Lecture Seule - Sans clés privées)</p>
+
+    <div class="container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Blockchain & Token</th>
+                    <th>Prix Token (USD)</th>
+                    <th>Gaz Brut</th>
+                    <th>Coût Transfert (USD)</th>
+                </tr>
+            </thead>
+            <tbody id="gas-table-body">
+                <!-- Les lignes seront générées par JavaScript -->
+            </tbody>
+        </table>
+        <p id="refresh-status">Mise à jour dans <span id="countdown">30</span>s... <span id="loader" class="loader" style="display:none;">(Actualisation...)</span></p>
+    </div>
+
+    <script>
+        // --- CONFIGURATION MISE À JOUR (URLs RPC publiques - Lecture Seule) ---
+        
+        // 1. Arc Testnet : Correction de l'URL (DNS correct)
+        const ARC_RPC_URL = "https://testnet.arc.network/rpc";
+        
+        // 2. Ethereum Sepolia : Remplacement d'Ankr par un nœud public gratuit sans clé API
+        const ETH_SEPOLIA_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
+        
+        // 3. Solana Devnet : Changement optionnel vers un endpoint public stable
+        const SOLANA_DEVNET_RPC_URL = "https://api.devnet.solana.com";
+
+        // API Publique Gratuite pour les prix (CoinGecko - Pas de clé requise)
+        const COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,solana&vs_currencies=usd";
+
+        // --- Constantes de Transaction Type ---
+        const EVM_TRANSFER_GAS_UNITS = 21000; // Unités de gaz pour un transfert simple sur EVM
+        const SOLANA_TRANSFER_FEE_LAMPORTS = 5000; // Frais de base pour un transfert Solana (sans priorité)
+
+        // --- Variables d'État ---
+        let arcProvider, ethProvider, solanaConnection;
+        let countdownValue = 30;
+        let countdownInterval;
+
+        // --- Initialisation des Connexions ---
+        function initProviders() {
+            // Ethers.js v6 Providers
+            arcProvider = new ethers.JsonRpcProvider(ARC_RPC_URL);
+            ethProvider = new ethers.JsonRpcProvider(ETH_SEPOLIA_RPC_URL);
+            // Solana web3.js Connection
+            solanaConnection = new solanaWeb3.Connection(SOLANA_DEVNET_RPC_URL);
+        }
+
+        // --- Logique Principal d'Actualisation ---
+        async function refreshGasData() {
+            document.getElementById('loader').style.display = 'inline';
+            const tableBody = document.getElementById('gas-table-body');
+            tableBody.innerHTML = ''; // Efface le tableau actuel
+
+            try {
+                // 1. Récupérer les prix des tokens depuis l'API CoinGecko
+                const pricesResponse = await fetch(COINGECKO_API_URL);
+                if (!pricesResponse.ok) throw new Error("CoinGecko API échec");
+                const tokenPrices = await pricesResponse.json();
+
+                const prices = {
+                    eth: tokenPrices.ethereum.usd,
+                    sol: tokenPrices.solana.usd,
+                    usdc: 1.00 // USDC vaut toujours 1$
+                };
+
+                // 2. Récupérer les données de gaz On-Chain (Lecture Seule)
+                // En parallèle pour aller plus vite
+                const [arcFeeData, ethFeeData] = await Promise.all([
+                    arcProvider.getFeeData(),
+                    ethProvider.getFeeData()
+                ]);
+
+                // --- CALCULS DES COÛTS ---
+
+                // A. ARC NETWORK (Native USDC Gas)
+                // Formule critique : Arc expose un RPC EVM mais le gaz est de l'USDC.
+                // Lorsque kit.getFeeData() renvoie le gasPrice, c'est en équivalent wei ($10^{-18}$).
+                // L'USDC réel a 6 décimales ($10^{-6}$). Il y a un facteur de conversion de $10^9$.
+                // Formule pour USDC float : (RawWeiGasPrice * GasUnits) / 10^15
+                const arcRawGasPrice = arcFeeData.gasPrice;
+                const arcUsdcCostFloat = (Number(arcRawGasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e15;
+
+                // B. ETHEREUM SEPOLIA
+                // Formule standard EVM : (RawWeiGasPrice * GasUnits / 10^18) * PrixETH_USD
+                const ethRawGasPrice = ethFeeData.gasPrice;
+                const ethEthCost = (Number(ethRawGasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e18;
+                const ethUsdCost = ethEthCost * prices.eth;
+
+                // C. SOLANA DEVNET
+                // Formule Solana : (FraisLamports / 10^9 SOL factor) * PrixSOL_USD
+                const solUsdCost = (SOLANA_TRANSFER_FEE_LAMPORTS / 1e9) * prices.sol;
+
+                // 3. Mise à jour de l'UI (Tableau)
+                addTableRow(tableBody, "Arc Network (USDC)", prices.usdc, `${ethers.formatUnits(arcRawGasPrice, 'gwei')} Gwei`, `$${arcUsdcCostFloat.toFixed(6)} USDC`, true);
+                addTableRow(tableBody, "Ethereum Sepolia (ETH)", prices.eth, `${ethers.formatUnits(ethRawGasPrice, 'gwei')} Gwei`, `$${ethUsdCost.toFixed(2)}`);
+                addTableRow(tableBody, "Solana Devnet (SOL)", prices.sol, `${SOLANA_TRANSFER_FEE_LAMPORTS} Lamports`, `$${solUsdCost.toFixed(6)}`);
+
+                resetCountdown();
+            } catch (error) {
+                console.error("Échec actualisation gaz :", error);
+                tableBody.innerHTML = `<tr><td colspan="4" class="stale">Erreur lors de la récupération des données On-Chain. Vérifiez la console (F12) pour plus de détails. Les nœuds RPC publics peuvent être temporairement indisponibles.</td></tr>`;
+            } finally {
+                document.getElementById('loader').style.display = 'none';
+            }
+        }
+
+        // --- Fonctions Utilitaires ---
+
+        function addTableRow(body, chain, price, rawGas, usdCost, isArc = false) {
+            const row = document.createElement('tr');
+            if (isArc) row.classList.add('arc-row');
+            
+            row.innerHTML = `
+                <td>${chain}</td>
+                <td>$${price.toFixed(2)} <span class="token-price">${isArc ? '' : '(Live)'}</span></td>
+                <td>${rawGas}</td>
+                <td>${usdCost}</td>
+            `;
+            body.appendChild(row);
+        }
+
+        // --- Logique du Compte à rebours ---
+        function resetCountdown() {
+            clearInterval(countdownInterval);
+            countdownValue = 30;
+            document.getElementById('countdown').innerText = countdownValue;
+            countdownInterval = setInterval(() => {
+                countdownValue--;
+                document.getElementById('countdown').innerText = countdownValue;
+                if (countdownValue <= 0) {
+                    refreshGasData();
+                }
+            }, 1000);
+        }
+
+        // --- Démarrage ---
+        initProviders();
+        refreshGasData(); // Première actualisation immédiate
+
+    </script>
+</body>
+</html>
