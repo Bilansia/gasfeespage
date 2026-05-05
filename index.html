@@ -63,11 +63,11 @@
         // 3. Solana Devnet
         const SOLANA_DEVNET_RPC_URL = "https://api.devnet.solana.com";
 
-        // 4. Polygon Amoy (New Testnet)
-        const POLYGON_AMOY_RPC_URL = "https://rpc-amoy.polygon.technology";
+        // 4. Polygon Amoy (Updated to stable public node)
+        const POLYGON_AMOY_RPC_URL = "https://polygon-amoy-rpc.publicnode.com";
 
-        // 5. Arbitrum Sepolia
-        const ARBITRUM_SEPOLIA_RPC_URL = "https://sepolia-rollup.arbitrum.io/rpc";
+        // 5. Arbitrum Sepolia (Updated to stable public node)
+        const ARBITRUM_SEPOLIA_RPC_URL = "https://arbitrum-sepolia-rpc.publicnode.com";
 
         // Free Public API for prices (CoinGecko)
         const COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,solana,matic-network&vs_currencies=usd";
@@ -79,7 +79,7 @@
         // --- State Variables ---
         let providers = {};
         let solanaConnection;
-        let countdownValue = 300;
+        let countdownValue = 300; // 5 minutes
         let countdownInterval;
 
         // --- Initialize Connections ---
@@ -98,15 +98,15 @@
             tableBody.innerHTML = ''; 
 
             try {
-                // 1. Fetch Token Prices
+                // 1. Fetch Token Prices (ANTI-CRASH MODE)
                 const pricesResponse = await fetch(COINGECKO_API_URL);
-                if (!pricesResponse.ok) throw new Error("CoinGecko API failed");
-                const tokenPrices = await pricesResponse.json();
+                const tokenPrices = pricesResponse.ok ? await pricesResponse.json() : {};
 
+                // Fallback to 0 if the API is rate-limited
                 const prices = {
-                    eth: tokenPrices.ethereum.usd,
-                    sol: tokenPrices.solana.usd,
-                    matic: tokenPrices['matic-network'].usd, // Polygon token (POL/MATIC)
+                    eth: tokenPrices?.ethereum?.usd || 0,
+                    sol: tokenPrices?.solana?.usd || 0,
+                    matic: tokenPrices?.['matic-network']?.usd || 0,
                     usdc: 1.00 
                 };
 
@@ -118,29 +118,32 @@
                     providers.arbitrum.getFeeData()
                 ]);
 
-                // --- COST CALCULATIONS ---
+                // --- COST CALCULATIONS (ANTI-CRASH MODE) ---
+                const arcRawGas = arcFee?.gasPrice || 0;
+                const ethRawGas = ethFee?.gasPrice || 0;
+                const polyRawGas = polygonFee?.gasPrice || 0;
+                const arbRawGas = arbitrumFee?.gasPrice || 0;
 
                 // A. ARC NETWORK (USDC)
-                const arcUsdcCost = (Number(arcFee.gasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e15;
+                const arcUsdcCost = (Number(arcRawGas) * EVM_TRANSFER_GAS_UNITS) / 1e15;
 
                 // B. ETHEREUM SEPOLIA (ETH)
-                const ethUsdCost = ((Number(ethFee.gasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.eth;
+                const ethUsdCost = ((Number(ethRawGas) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.eth;
 
                 // C. SOLANA DEVNET (SOL)
                 const solUsdCost = (SOLANA_TRANSFER_FEE_LAMPORTS / 1e9) * prices.sol;
 
                 // D. POLYGON AMOY (MATIC/POL)
-                const polyUsdCost = ((Number(polygonFee.gasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.matic;
+                const polyUsdCost = ((Number(polyRawGas) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.matic;
 
                 // E. ARBITRUM SEPOLIA (ETH used for gas)
-                const arbUsdCost = ((Number(arbitrumFee.gasPrice) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.eth;
-
+                const arbUsdCost = ((Number(arbRawGas) * EVM_TRANSFER_GAS_UNITS) / 1e18) * prices.eth;
 
                 // 3. Update UI
-                addTableRow(tableBody, "Arc Network (USDC Gas)", prices.usdc, `${ethers.formatUnits(arcFee.gasPrice, 'gwei')} Gwei`, `$${arcUsdcCost.toFixed(6)} USDC`, true);
-                addTableRow(tableBody, "Ethereum Sepolia (ETH)", prices.eth, `${ethers.formatUnits(ethFee.gasPrice, 'gwei')} Gwei`, `$${ethUsdCost.toFixed(4)}`);
-                addTableRow(tableBody, "Arbitrum Sepolia (ETH L2)", prices.eth, `${ethers.formatUnits(arbitrumFee.gasPrice, 'gwei')} Gwei`, `$${arbUsdCost.toFixed(6)}`);
-                addTableRow(tableBody, "Polygon Amoy (MATIC)", prices.matic, `${ethers.formatUnits(polygonFee.gasPrice, 'gwei')} Gwei`, `$${polyUsdCost.toFixed(6)}`);
+                addTableRow(tableBody, "Arc Network (USDC Gas)", prices.usdc, `${ethers.formatUnits(arcRawGas, 'gwei')} Gwei`, `$${arcUsdcCost.toFixed(6)} USDC`, true);
+                addTableRow(tableBody, "Ethereum Sepolia (ETH)", prices.eth, `${ethers.formatUnits(ethRawGas, 'gwei')} Gwei`, `$${ethUsdCost.toFixed(4)}`);
+                addTableRow(tableBody, "Arbitrum Sepolia (ETH L2)", prices.eth, `${ethers.formatUnits(arbRawGas, 'gwei')} Gwei`, `$${arbUsdCost.toFixed(6)}`);
+                addTableRow(tableBody, "Polygon Amoy (MATIC)", prices.matic, `${ethers.formatUnits(polyRawGas, 'gwei')} Gwei`, `$${polyUsdCost.toFixed(6)}`);
                 addTableRow(tableBody, "Solana Devnet (SOL)", prices.sol, `${SOLANA_TRANSFER_FEE_LAMPORTS} Lamports`, `$${solUsdCost.toFixed(6)}`);
 
                 resetCountdown();
@@ -157,9 +160,10 @@
             const row = document.createElement('tr');
             if (isArc) row.classList.add('arc-row'); 
             
+            // ANTI-CRASH: (price || 0).toFixed(2) ensures it won't crash if price is missing
             row.innerHTML = `
                 <td>${chain}</td>
-                <td>$${price.toFixed(2)} <span class="token-price">${isArc ? '' : '(Live)'}</span></td>
+                <td>$${(price || 0).toFixed(2)} <span class="token-price">${isArc ? '' : '(Live)'}</span></td>
                 <td>${rawGas}</td>
                 <td>${usdCost}</td>
             `;
